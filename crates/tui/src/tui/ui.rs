@@ -135,7 +135,7 @@ const SIDEBAR_VISIBLE_MIN_WIDTH: u16 = 100;
 const DEFAULT_TERMINAL_PROBE_TIMEOUT_MS: u64 = 500;
 
 type AppTerminal = Terminal<ColorCompatBackend<Stdout>>;
-const TERMINAL_ORIGIN_RESET: &[u8] = b"\x1b[r\x1b[?6l\x1b[H\x1b[2J";
+const TERMINAL_ORIGIN_RESET: &[u8] = b"\x1b[r\x1b[?6l\x1b[H\x1b[2J\x1b[3J";
 
 /// Run the interactive TUI event loop.
 ///
@@ -2361,12 +2361,8 @@ async fn run_event_loop(
                 {
                     app.mention_menu_selected = app.mention_menu_selected.saturating_sub(1);
                 }
-                KeyCode::Up
-                    if key.modifiers.is_empty()
-                        && slash_menu_open
-                        && app.slash_menu_selected > 0 =>
-                {
-                    app.slash_menu_selected = app.slash_menu_selected.saturating_sub(1);
+                KeyCode::Up if key.modifiers.is_empty() && slash_menu_open => {
+                    select_previous_slash_menu_entry(app, slash_menu_entries.len());
                 }
                 KeyCode::Up
                     if key.modifiers.is_empty()
@@ -2409,8 +2405,7 @@ async fn run_event_loop(
                         .min(mention_menu_entries.len().saturating_sub(1));
                 }
                 KeyCode::Down if key.modifiers.is_empty() && slash_menu_open => {
-                    app.slash_menu_selected = (app.slash_menu_selected + 1)
-                        .min(slash_menu_entries.len().saturating_sub(1));
+                    select_next_slash_menu_entry(app, slash_menu_entries.len());
                 }
                 KeyCode::Down
                     if key.modifiers.is_empty()
@@ -3440,6 +3435,22 @@ fn next_escape_action(app: &App, slash_menu_open: bool) -> EscapeAction {
     }
 }
 
+fn select_previous_slash_menu_entry(app: &mut App, entry_count: usize) {
+    if entry_count == 0 {
+        return;
+    }
+    let selected = app.slash_menu_selected.min(entry_count.saturating_sub(1));
+    app.slash_menu_selected = (selected + entry_count - 1) % entry_count;
+}
+
+fn select_next_slash_menu_entry(app: &mut App, entry_count: usize) {
+    if entry_count == 0 {
+        return;
+    }
+    let selected = app.slash_menu_selected.min(entry_count.saturating_sub(1));
+    app.slash_menu_selected = (selected + 1) % entry_count;
+}
+
 fn handle_composer_history_arrow(
     app: &mut App,
     key: KeyEvent,
@@ -3453,13 +3464,28 @@ fn handle_composer_history_arrow(
         return false;
     }
 
+    // Ctrl+Up/Down navigates composer history.
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Up => {
+                app.history_up();
+                return true;
+            }
+            KeyCode::Down => {
+                app.history_down();
+                return true;
+            }
+            _ => return false,
+        }
+    }
+    // Plain Up/Down scrolls the transcript.
     match key.code {
         KeyCode::Up => {
-            app.history_up();
+            app.scroll_up(3);
             true
         }
         KeyCode::Down => {
-            app.history_down();
+            app.scroll_down(3);
             true
         }
         _ => false,
@@ -5748,6 +5774,14 @@ async fn handle_view_events(
             ViewEvent::BacktrackConfirm => {
                 if let Some(depth) = app.backtrack.confirm() {
                     apply_backtrack(app, depth);
+                    let _ = engine_handle
+                        .send(Op::SyncSession {
+                            messages: app.api_messages.clone(),
+                            system_prompt: app.system_prompt.clone(),
+                            model: app.model.clone(),
+                            workspace: app.workspace.clone(),
+                        })
+                        .await;
                 }
             }
             ViewEvent::BacktrackCancel => {
@@ -6272,7 +6306,9 @@ fn reset_terminal_viewport(terminal: &mut AppTerminal) -> Result<()> {
     // Reset scroll margins and origin mode before clearing. Some interactive
     // child processes leave DECSTBM/DECOM behind; if ratatui's diff renderer
     // then writes "row 0", terminals can place it relative to the leaked
-    // scroll region and the whole viewport appears shifted down.
+    // scroll region and the whole viewport appears shifted down. CSI 3J also
+    // erases saved scrollback so a focus/resize recapture cannot leave the
+    // host terminal's scrollbar above the live TUI.
     terminal.backend_mut().write_all(TERMINAL_ORIGIN_RESET)?;
     terminal.backend_mut().flush()?;
     terminal.clear()?;

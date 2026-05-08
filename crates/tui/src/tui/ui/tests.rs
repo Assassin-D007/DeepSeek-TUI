@@ -46,8 +46,14 @@ fn terminal_origin_reset_resets_scroll_region_origin_and_clears() {
         "must reset scroll margins and origin mode before repaint"
     );
     assert!(
-        TERMINAL_ORIGIN_RESET.ends_with(b"\x1b[H\x1b[2J"),
+        TERMINAL_ORIGIN_RESET.ends_with(b"\x1b[H\x1b[2J\x1b[3J"),
         "must home the cursor and clear the viewport"
+    );
+    assert!(
+        TERMINAL_ORIGIN_RESET
+            .windows(b"\x1b[3J".len())
+            .any(|sequence| sequence == b"\x1b[3J"),
+        "must erase saved scrollback when reclaiming the viewport"
     );
 }
 
@@ -1813,6 +1819,39 @@ fn visible_slash_menu_entries_excludes_removed_commands() {
     assert!(entries.iter().any(|entry| entry.name == "/links"));
     assert!(!entries.iter().any(|entry| entry.name == "/set"));
     assert!(!entries.iter().any(|entry| entry.name == "/deepseek"));
+}
+
+#[test]
+fn slash_menu_up_wraps_from_first_to_last() {
+    let mut app = create_test_app();
+    app.input = "/".to_string();
+    app.cursor_position = 1;
+    app.input_history.push("previous prompt".to_string());
+
+    let entries = visible_slash_menu_entries(&app, 128);
+    assert!(entries.len() > 1);
+
+    app.slash_menu_selected = 0;
+    select_previous_slash_menu_entry(&mut app, entries.len());
+
+    assert_eq!(app.slash_menu_selected, entries.len() - 1);
+    assert_eq!(app.input, "/");
+}
+
+#[test]
+fn slash_menu_down_wraps_from_last_to_first() {
+    let mut app = create_test_app();
+    app.input = "/".to_string();
+    app.cursor_position = 1;
+
+    let entries = visible_slash_menu_entries(&app, 128);
+    assert!(entries.len() > 1);
+
+    app.slash_menu_selected = entries.len() - 1;
+    select_next_slash_menu_entry(&mut app, entries.len());
+
+    assert_eq!(app.slash_menu_selected, 0);
+    assert_eq!(app.input, "/");
 }
 
 #[test]
